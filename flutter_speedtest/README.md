@@ -12,18 +12,15 @@
 
 ## 配置
 
-默认配置在 `lib/main.dart` 顶部常量，按需改：
+- **预设节点**（移植自 app 示例 `NodeSelectionActivity`）在 `lib/models/socks5_config.dart` 的 `Socks5Config.presets`，默认使用 USA 节点；界面顶部下拉可切 USA/Japan 或选「手动填写」。
+- 测速/探测地址在 `lib/main.dart` 顶部常量：
 
 ```dart
-const String kDefaultSocksHost = '127.0.0.1'; // SOCKS5 服务器地址
-const int kDefaultSocksPort = 1080;           // 端口
-const String kDefaultSocksUser = '';          // 账号(可空)
-const String kDefaultSocksPass = '';          // 密码(可空)
 const String kDefaultDownloadUrl = 'http://speedtest.tele2.net/100MB.zip';
 const String kDefaultPingUrl = 'http://www.gstatic.com/generate_204';
 ```
 
-界面上这些字段在未连接时也可直接编辑。
+界面上所有字段在未连接时都可直接编辑。
 
 ## 集成方式
 

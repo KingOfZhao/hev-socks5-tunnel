@@ -10,12 +10,9 @@ import 'services/stability_monitor.dart';
 import 'services/throughput_tracker.dart';
 
 // =============================================================
-// 硬编码默认配置（按需修改；界面上未连接时也可临时改）
+// 默认配置：默认使用预设节点(USA)，界面可切换预设或手填。
+// 预设节点见 models/socks5_config.dart 的 Socks5Config.presets。
 // =============================================================
-const String kDefaultSocksHost = '127.0.0.1';
-const int kDefaultSocksPort = 1080;
-const String kDefaultSocksUser = '';
-const String kDefaultSocksPass = '';
 const String kDefaultDownloadUrl = 'http://speedtest.tele2.net/100MB.zip';
 const String kDefaultPingUrl = 'http://www.gstatic.com/generate_204';
 
@@ -50,13 +47,16 @@ class _HomePageState extends State<HomePage> {
   final _stability = StabilityMonitor();
   final _speedTester = SpeedTester();
 
-  // ---- 输入 ----
-  final _host = TextEditingController(text: kDefaultSocksHost);
-  final _port = TextEditingController(text: '$kDefaultSocksPort');
-  final _user = TextEditingController(text: kDefaultSocksUser);
-  final _pass = TextEditingController(text: kDefaultSocksPass);
+  // ---- 输入（默认填入 USA 预设节点）----
+  final _host = TextEditingController(text: Socks5Config.defaultNode.host);
+  final _port = TextEditingController(text: '${Socks5Config.defaultNode.port}');
+  final _user = TextEditingController(text: Socks5Config.defaultNode.username);
+  final _pass = TextEditingController(text: Socks5Config.defaultNode.password);
   final _downloadUrl = TextEditingController(text: kDefaultDownloadUrl);
   final _pingUrl = TextEditingController(text: kDefaultPingUrl);
+
+  // 当前选中的预设（null 表示手填）
+  Socks5Config? _selectedPreset = Socks5Config.defaultNode;
 
   // ---- 状态 ----
   bool _connected = false;
@@ -87,10 +87,23 @@ class _HomePageState extends State<HomePage> {
 
   Socks5Config _buildConfig() => Socks5Config(
         host: _host.text.trim(),
-        port: int.tryParse(_port.text.trim()) ?? kDefaultSocksPort,
+        port: int.tryParse(_port.text.trim()) ?? Socks5Config.defaultNode.port,
         username: _user.text,
         password: _pass.text,
       );
+
+  /// 选择预设节点后，把字段填入输入框。
+  void _applyPreset(Socks5Config? preset) {
+    setState(() {
+      _selectedPreset = preset;
+      if (preset != null) {
+        _host.text = preset.host;
+        _port.text = '${preset.port}';
+        _user.text = preset.username;
+        _pass.text = preset.password;
+      }
+    });
+  }
 
   Future<void> _connect() async {
     if (_busy) return;
@@ -214,6 +227,8 @@ class _HomePageState extends State<HomePage> {
         padding: const EdgeInsets.all(12),
         child: Column(
           children: [
+            _presetDropdown(),
+            const SizedBox(height: 8),
             Row(
               children: [
                 Expanded(flex: 2, child: _field(_host, 'SOCKS5 地址')),
@@ -234,6 +249,25 @@ class _HomePageState extends State<HomePage> {
           ],
         ),
       ),
+    );
+  }
+
+  Widget _presetDropdown() {
+    return DropdownButtonFormField<Socks5Config?>(
+      initialValue: _selectedPreset,
+      isExpanded: true,
+      decoration: const InputDecoration(
+        labelText: '预设节点',
+        isDense: true,
+        border: OutlineInputBorder(),
+      ),
+      items: [
+        ...Socks5Config.presets.map(
+          (p) => DropdownMenuItem<Socks5Config?>(value: p, child: Text(p.toString())),
+        ),
+        const DropdownMenuItem<Socks5Config?>(value: null, child: Text('手动填写')),
+      ],
+      onChanged: _connected ? null : _applyPreset,
     );
   }
 
