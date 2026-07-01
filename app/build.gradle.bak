@@ -1,0 +1,28 @@
+plugins {
+    id 'com.android.application'
+}
+
+repositories { flatDir { dirs 'libs' } }
+android {
+    compileSdkVersion 33
+
+    defaultConfig {
+        applicationId "com.example.hevsocks5demo"
+        minSdkVersion 21
+        targetSdkVersion 33
+        versionCode 1
+        versionName "1.0"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+}
+
+dependencies {
+    implementation(name: 'hev-socks5-sdk-release', ext: 'aar')
+    implementation 'androidx.appcompat:appcompat:1.6.1'
+    implementation 'com.google.android.material:material:1.9.0'
+}

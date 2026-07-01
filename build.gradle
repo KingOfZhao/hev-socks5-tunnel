@@ -1,0 +1,37 @@
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath 'com.android.tools.build:gradle:7.4.2'
+    }
+}
+
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+def removeAppleDoubleFiles = {
+    subprojects.each { subproject ->
+        if (subproject.buildDir.exists()) {
+            exec {
+                commandLine 'find', subproject.buildDir.absolutePath, '-name', '._*', '-delete'
+            }
+        }
+    }
+}
+
+subprojects {
+    tasks.configureEach { task ->
+        task.doFirst {
+            removeAppleDoubleFiles()
+        }
+        task.doLast {
+            removeAppleDoubleFiles()
+        }
+    }
+}

@@ -1,0 +1,2 @@
+rootProject.name = 'hev-socks5-tunnel'
+include ':app', ':hev-socks5-sdk'

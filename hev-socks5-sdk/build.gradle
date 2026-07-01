@@ -1,0 +1,30 @@
+plugins {
+    id 'com.android.library'
+}
+
+def VERSION_NAME = project.findProperty('VERSION_NAME') ?: '0.1.0'
+def VERSION_CODE = project.findProperty('VERSION_CODE') ?: '1'
+
+version = VERSION_NAME
+
+android {
+    compileSdkVersion 33
+
+    defaultConfig {
+        minSdkVersion 21
+        targetSdkVersion 33
+        versionCode Integer.parseInt(VERSION_CODE)
+        versionName VERSION_NAME
+    }
+
+    sourceSets {
+        main {
+            jniLibs.srcDirs = ['src/main/jniLibs']
+        }
+    }
+
+    namespace 'com.zq.qf.socks5proxy'
+}
+
+dependencies {
+}
