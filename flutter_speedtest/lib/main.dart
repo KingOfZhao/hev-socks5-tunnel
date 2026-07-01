@@ -1,14 +1,16 @@
 import 'dart:async';
-import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import 'models/socks5_config.dart';
+import 'services/hev_socks5_service.dart';
+import 'services/speed_tester.dart';
+import 'services/stability_monitor.dart';
+import 'services/throughput_tracker.dart';
+
 // =============================================================
-// 硬编码默认配置（按需修改；界面上也可临时改）
-//   - SOCKS5 服务器地址/端口/账号密码
-//   - 测速下载地址（大文件）
-//   - 稳定性探测地址（返回 204 的小接口）
+// 硬编码默认配置（按需修改；界面上未连接时也可临时改）
 // =============================================================
 const String kDefaultSocksHost = '127.0.0.1';
 const int kDefaultSocksPort = 1080;
@@ -16,8 +18,6 @@ const String kDefaultSocksUser = '';
 const String kDefaultSocksPass = '';
 const String kDefaultDownloadUrl = 'http://speedtest.tele2.net/100MB.zip';
 const String kDefaultPingUrl = 'http://www.gstatic.com/generate_204';
-
-const MethodChannel _channel = MethodChannel('com.zq.qf/hev_socks5');
 
 void main() {
   runApp(const SpeedTestApp());
@@ -44,6 +44,13 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
+  // ---- 工具类 ----
+  final _service = const HevSocks5Service();
+  final _tracker = ThroughputTracker();
+  final _stability = StabilityMonitor();
+  final _speedTester = SpeedTester();
+
+  // ---- 输入 ----
   final _host = TextEditingController(text: kDefaultSocksHost);
   final _port = TextEditingController(text: '$kDefaultSocksPort');
   final _user = TextEditingController(text: kDefaultSocksUser);
@@ -51,26 +58,12 @@ class _HomePageState extends State<HomePage> {
   final _downloadUrl = TextEditingController(text: kDefaultDownloadUrl);
   final _pingUrl = TextEditingController(text: kDefaultPingUrl);
 
+  // ---- 状态 ----
   bool _connected = false;
   bool _busy = false;
-
-  // 实时速率（由原生 tx/rx 字节差分得到）
   Timer? _statsTimer;
-  int _lastTx = 0;
-  int _lastRx = 0;
-  double _upKBs = 0;
-  double _downKBs = 0;
-  int _totalTx = 0;
-  int _totalRx = 0;
-
-  // 稳定性探测
-  Timer? _pingTimer;
-  int _pingOk = 0;
-  int _pingFail = 0;
-  int _lastLatencyMs = -1;
   DateTime? _connectedAt;
 
-  // 下载测速
   bool _downloading = false;
   double _downloadMBps = 0;
   String _downloadResult = '';
@@ -80,7 +73,7 @@ class _HomePageState extends State<HomePage> {
   @override
   void dispose() {
     _statsTimer?.cancel();
-    _pingTimer?.cancel();
+    _stability.stop();
     super.dispose();
   }
 
@@ -92,26 +85,24 @@ class _HomePageState extends State<HomePage> {
     });
   }
 
+  Socks5Config _buildConfig() => Socks5Config(
+        host: _host.text.trim(),
+        port: int.tryParse(_port.text.trim()) ?? kDefaultSocksPort,
+        username: _user.text,
+        password: _pass.text,
+      );
+
   Future<void> _connect() async {
     if (_busy) return;
     setState(() => _busy = true);
     try {
-      final ok = await _channel.invokeMethod<bool>('start', {
-        'host': _host.text.trim(),
-        'port': int.tryParse(_port.text.trim()) ?? kDefaultSocksPort,
-        'username': _user.text,
-        'password': _pass.text,
-        'global': true,
-        'udpInTcp': false,
-      });
-      if (ok == true) {
+      final ok = await _service.start(_buildConfig());
+      if (ok) {
         _connected = true;
         _connectedAt = DateTime.now();
-        _lastTx = 0;
-        _lastRx = 0;
-        _pingOk = 0;
-        _pingFail = 0;
-        _startTimers();
+        _tracker.reset();
+        _stability.reset();
+        _startMonitors();
         _log('已启动 VPN，连接 ${_host.text}:${_port.text}');
       } else {
         _log('启动失败或用户拒绝 VPN 授权');
@@ -127,9 +118,9 @@ class _HomePageState extends State<HomePage> {
     if (_busy) return;
     setState(() => _busy = true);
     try {
-      await _channel.invokeMethod('stop');
+      await _service.stop();
       _connected = false;
-      _stopTimers();
+      _stopMonitors();
       _log('已断开 VPN');
     } on PlatformException catch (e) {
       _log('停止异常: ${e.message}');
@@ -138,67 +129,28 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  void _startTimers() {
-    _statsTimer = Timer.periodic(const Duration(seconds: 1), (_) => _pollStats());
-    _pingTimer = Timer.periodic(const Duration(seconds: 3), (_) => _ping());
-  }
-
-  void _stopTimers() {
-    _statsTimer?.cancel();
-    _pingTimer?.cancel();
-    _statsTimer = null;
-    _pingTimer = null;
-    setState(() {
-      _upKBs = 0;
-      _downKBs = 0;
+  void _startMonitors() {
+    _statsTimer = Timer.periodic(const Duration(seconds: 1), (_) async {
+      final stats = await _service.getStats();
+      _tracker.update(stats);
+      if (mounted) setState(() {});
     });
+    _stability.start(
+      _pingUrl.text.trim(),
+      onUpdate: () {
+        if (mounted) setState(() {});
+      },
+      onError: (e) => _log('探测失败: $e'),
+    );
   }
 
-  // 读取原生统计 [tx_packets, tx_bytes, rx_packets, rx_bytes]，差分算速率
-  Future<void> _pollStats() async {
-    try {
-      final stats = await _channel.invokeMethod<List<dynamic>>('getStats');
-      if (stats == null || stats.length < 4) return;
-      final tx = (stats[1] as num).toInt();
-      final rx = (stats[3] as num).toInt();
-      setState(() {
-        _upKBs = (tx - _lastTx) / 1024.0;
-        _downKBs = (rx - _lastRx) / 1024.0;
-        _lastTx = tx;
-        _lastRx = rx;
-        _totalTx = tx;
-        _totalRx = rx;
-      });
-    } catch (_) {}
+  void _stopMonitors() {
+    _statsTimer?.cancel();
+    _statsTimer = null;
+    _stability.stop();
+    setState(() {});
   }
 
-  // 稳定性：定时探测，记录成功/失败与延迟
-  Future<void> _ping() async {
-    final url = _pingUrl.text.trim();
-    if (url.isEmpty) return;
-    final sw = Stopwatch()..start();
-    final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
-    try {
-      final req = await client.getUrl(Uri.parse(url));
-      final resp = await req.close().timeout(const Duration(seconds: 8));
-      await resp.drain();
-      sw.stop();
-      setState(() {
-        _pingOk++;
-        _lastLatencyMs = sw.elapsedMilliseconds;
-      });
-    } catch (e) {
-      setState(() {
-        _pingFail++;
-        _lastLatencyMs = -1;
-      });
-      _log('探测失败: $e');
-    } finally {
-      client.close(force: true);
-    }
-  }
-
-  // 主动下载测速：下载大文件，统计平均速率
   Future<void> _runDownloadTest() async {
     if (_downloading) return;
     setState(() {
@@ -206,65 +158,34 @@ class _HomePageState extends State<HomePage> {
       _downloadResult = '';
       _downloadMBps = 0;
     });
-    final url = _downloadUrl.text.trim();
-    final client = HttpClient()..connectionTimeout = const Duration(seconds: 10);
-    final sw = Stopwatch()..start();
-    int received = 0;
     try {
-      final req = await client.getUrl(Uri.parse(url));
-      final resp = await req.close();
-      // 最长测速 20 秒，避免下载超大文件卡住
-      final completer = Completer<void>();
-      late StreamSubscription sub;
-      final limit = Timer(const Duration(seconds: 20), () {
-        if (!completer.isCompleted) completer.complete();
-      });
-      sub = resp.listen((chunk) {
-        received += chunk.length;
-        final secs = sw.elapsedMilliseconds / 1000.0;
-        if (secs > 0) {
-          setState(() => _downloadMBps = received / 1024.0 / 1024.0 / secs);
-        }
-      }, onDone: () {
-        if (!completer.isCompleted) completer.complete();
-      }, onError: (e) {
-        if (!completer.isCompleted) completer.completeError(e);
-      });
-      await completer.future;
-      await sub.cancel();
-      limit.cancel();
-      sw.stop();
-      final secs = sw.elapsedMilliseconds / 1000.0;
-      final mbps = secs > 0 ? received / 1024.0 / 1024.0 / secs : 0;
+      final result = await _speedTester.download(
+        _downloadUrl.text.trim(),
+        onProgress: (mbps) {
+          if (mounted) setState(() => _downloadMBps = mbps);
+        },
+      );
       setState(() {
-        _downloadMBps = mbps.toDouble();
-        _downloadResult =
-            '下载 ${(received / 1024.0 / 1024.0).toStringAsFixed(1)} MB，用时 ${secs.toStringAsFixed(1)}s，'
-            '平均 ${mbps.toStringAsFixed(2)} MB/s (${(mbps * 8).toStringAsFixed(1)} Mbps)';
+        _downloadMBps = result.mbps;
+        _downloadResult = result.toString();
       });
-      _log(_downloadResult);
+      _log(result.toString());
     } catch (e) {
       setState(() => _downloadResult = '下载测速失败: $e');
       _log('下载测速失败: $e');
     } finally {
-      client.close(force: true);
       setState(() => _downloading = false);
     }
   }
 
   String _uptime() {
-    if (_connectedAt == null) return '-';
+    if (_connectedAt == null || !_connected) return '-';
     final d = DateTime.now().difference(_connectedAt!);
-    final h = d.inHours;
-    final m = d.inMinutes % 60;
-    final s = d.inSeconds % 60;
-    return '${h}h ${m}m ${s}s';
+    return '${d.inHours}h ${d.inMinutes % 60}m ${d.inSeconds % 60}s';
   }
 
   @override
   Widget build(BuildContext context) {
-    final total = _pingOk + _pingFail;
-    final lossRate = total == 0 ? 0 : (_pingFail * 100 / total);
     return Scaffold(
       appBar: AppBar(title: const Text('hev-socks5 速率/稳定性测试')),
       body: SingleChildScrollView(
@@ -276,7 +197,7 @@ class _HomePageState extends State<HomePage> {
             const SizedBox(height: 12),
             _connectButton(),
             const SizedBox(height: 12),
-            _statsCard(lossRate.toDouble()),
+            _statsCard(),
             const SizedBox(height: 12),
             _downloadCard(),
             const SizedBox(height: 12),
@@ -333,9 +254,7 @@ class _HomePageState extends State<HomePage> {
     return FilledButton.icon(
       onPressed: _busy ? null : (_connected ? _disconnect : _connect),
       icon: Icon(_connected ? Icons.stop : Icons.play_arrow),
-      label: Text(_busy
-          ? '处理中...'
-          : (_connected ? '断开 VPN' : '连接 VPN')),
+      label: Text(_busy ? '处理中...' : (_connected ? '断开 VPN' : '连接 VPN')),
       style: FilledButton.styleFrom(
         backgroundColor: _connected ? Colors.red : Colors.blue,
         minimumSize: const Size.fromHeight(48),
@@ -343,7 +262,7 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  Widget _statsCard(double lossRate) {
+  Widget _statsCard() {
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(12),
@@ -354,15 +273,15 @@ class _HomePageState extends State<HomePage> {
             const Divider(),
             _row('状态', _connected ? '已连接' : '未连接'),
             _row('已连接时长', _uptime()),
-            _row('上行速率', '${_upKBs.toStringAsFixed(1)} KB/s'),
-            _row('下行速率', '${_downKBs.toStringAsFixed(1)} KB/s'),
-            _row('累计上行', '${(_totalTx / 1024.0 / 1024.0).toStringAsFixed(2)} MB'),
-            _row('累计下行', '${(_totalRx / 1024.0 / 1024.0).toStringAsFixed(2)} MB'),
+            _row('上行速率', '${_tracker.upKBs.toStringAsFixed(1)} KB/s'),
+            _row('下行速率', '${_tracker.downKBs.toStringAsFixed(1)} KB/s'),
+            _row('累计上行', '${_tracker.totalTxMB.toStringAsFixed(2)} MB'),
+            _row('累计下行', '${_tracker.totalRxMB.toStringAsFixed(2)} MB'),
             const Divider(),
-            _row('探测成功/失败', '$_pingOk / $_pingFail'),
-            _row('丢包率', '${lossRate.toStringAsFixed(1)} %'),
+            _row('探测成功/失败', '${_stability.okCount} / ${_stability.failCount}'),
+            _row('丢包率', '${_stability.lossRate.toStringAsFixed(1)} %'),
             _row('最近延迟',
-                _lastLatencyMs >= 0 ? '$_lastLatencyMs ms' : '超时'),
+                _stability.lastLatencyMs >= 0 ? '${_stability.lastLatencyMs} ms' : '超时'),
           ],
         ),
       ),
@@ -380,25 +299,17 @@ class _HomePageState extends State<HomePage> {
             const SizedBox(height: 8),
             _field(_downloadUrl, '下载测速 URL'),
             const SizedBox(height: 8),
-            Row(
-              children: [
-                Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: (_connected && !_downloading)
-                        ? _runDownloadTest
-                        : null,
-                    icon: _downloading
-                        ? const SizedBox(
-                            width: 16,
-                            height: 16,
-                            child: CircularProgressIndicator(strokeWidth: 2))
-                        : const Icon(Icons.download),
-                    label: Text(_downloading
-                        ? '测速中 ${_downloadMBps.toStringAsFixed(2)} MB/s'
-                        : '开始下载测速'),
-                  ),
-                ),
-              ],
+            OutlinedButton.icon(
+              onPressed: (_connected && !_downloading) ? _runDownloadTest : null,
+              icon: _downloading
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2))
+                  : const Icon(Icons.download),
+              label: Text(_downloading
+                  ? '测速中 ${_downloadMBps.toStringAsFixed(2)} MB/s'
+                  : '开始下载测速'),
             ),
             if (_downloadResult.isNotEmpty) ...[
               const SizedBox(height: 8),
